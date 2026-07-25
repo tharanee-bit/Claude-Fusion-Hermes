@@ -308,19 +308,26 @@ if [ "${#CLAUDE_SAFE_ARGS[@]}" -gt 0 ] && ! clf_safe_mode_supported; then
 fi
 
 WF_NOTE=""
-if [ "$DEPTH" = "workflow" ] && [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ]; then
+if clf_ultracode_enabled; then
   WF_NOTE="
-You may run a READ-ONLY multi-agent adversarial review for deeper coverage. Do not edit files or run
-mutating commands. This consultation is advisory and must never merge a codex-dw integration branch."
+Run a READ-ONLY multi-agent adversarial review (dynamic workflows / parallel subagents) for deeper
+coverage: find candidate issues, then have independent agents try to refute each one before you
+report it. Do not edit files or run mutating commands. This consultation is advisory and must never
+merge a codex-dw integration branch."
+  [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ] || WF_NOTE="$WF_NOTE
+Claude Fusion is running you in --safe-mode, so orchestrate with the built-in Task/Workflow tools
+and do not rely on user/project Claude customizations, skills, plugins, saved workflows, memory,
+MCP servers, or custom agents."
 elif [ "$DEPTH" = "workflow" ]; then
   WF_NOTE="
-Run a thorough READ-ONLY review rather than a single quick pass. Claude Fusion is running you in
---safe-mode, so do not rely on user/project Claude customizations, skills, plugins, workflows,
-memory, MCP servers, or custom agents."
+Run a thorough READ-ONLY review rather than a single quick pass."
+  [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ] || WF_NOTE="$WF_NOTE
+Claude Fusion is running you in --safe-mode, so do not rely on user/project Claude customizations,
+skills, plugins, workflows, memory, MCP servers, or custom agents."
 fi
 
 CLAUDE_PREFIX=""
-[ "$DEPTH" = "workflow" ] && [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ] && CLAUDE_PREFIX="ultracode: "
+clf_ultracode_enabled && CLAUDE_PREFIX="ultracode: "
 CLAUDE_PROMPT="${CLAUDE_PREFIX}You are Claude acting as an independent code reviewer for the OpenAI Codex agent.
 You are running automatically from a Codex Stop hook, in READ-ONLY mode.
 Do not edit files. Do not run destructive commands. Do not merge, reset, or modify any integration
@@ -354,7 +361,7 @@ CLF_CONTRACT_TYPE=review
 CLF_JSON_SCHEMA='{"type":"object","additionalProperties":false,"required":["verdict","findings"],"properties":{"verdict":{"type":"string","enum":["PASS","ISSUES_FOUND"]},"findings":{"type":"array","maxItems":12,"items":{"type":"string"}}}}'
 CLF_KEEP_SESSION=0
 CLF_RESUME_ID=""
-clf_dbg "running claude review (model=$CLAUDE_MODEL, effort=$CLAUDE_EFFORT, depth=$DEPTH, artifacts=$ARTIFACT_COUNT)"
+clf_dbg "running claude review (model=$CLAUDE_MODEL, effort=$CLAUDE_EFFORT, depth=$DEPTH, ultracode=$ULTRACODE, artifacts=$ARTIFACT_COUNT)"
 clf_run_claude_contract
 RC="$CLF_RC"
 [ "$RC" -eq 0 ] || { record_review_failure; clf_dbg "claude rc!=0 -> exit (review state kept for retry)"; exit 0; }

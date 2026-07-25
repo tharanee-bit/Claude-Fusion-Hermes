@@ -9,16 +9,29 @@ clf_init_common() {
   # Per-user state dir, mode 0700. On a shared /tmp a hostile co-tenant could otherwise pre-create a
   # predictable shared dir and read/delete our markers, so we also refuse a dir we do not own.
   STATE_DIR="${TMPDIR:-/tmp}/claude-fusion-state-$(id -u 2>/dev/null || echo 0)"
-  # Claude Fusion tries the latest Fable at extra-high (xhigh) effort, then retries fast failures
-  # once with the latest Opus at xhigh. Primary model/effort can be overridden; fallback stays fixed.
-  CLAUDE_MODEL="${CLAUDE_FUSION_MODEL:-fable}"      # latest Fable by alias
+  # Claude Fusion tries the latest Opus (Opus 5) at extra-high (xhigh) effort, then retries fast
+  # failures once with the latest Fable at xhigh. The primary model/effort can be overridden; the
+  # fallback stays fixed so a bad override still recovers on a known-good pair.
+  CLAUDE_MODEL="${CLAUDE_FUSION_MODEL:-opus}"       # latest Opus by alias (Opus 5)
   CLAUDE_EFFORT="${CLAUDE_FUSION_EFFORT:-xhigh}"   # low / medium / high / xhigh / max
-  CLF_FALLBACK_MODEL="opus"                         # latest Opus by alias
+  CLF_FALLBACK_MODEL="fable"                        # latest Fable by alias
   CLF_FALLBACK_EFFORT="xhigh"
   CONTINUITY="${CLAUDE_FUSION_CONTINUITY:-0}"      # opt-in resumable UserPromptSubmit sessions
   SUBAGENT_REVIEW="${CLAUDE_FUSION_SUBAGENT_REVIEW:-1}"
   SUBAGENT_REVIEW_LIMIT="$(clf_positive_int "${CLAUDE_FUSION_SUBAGENT_REVIEW_LIMIT:-2}" 2)"
+  # Adversarial verification of codex-dw worker subagents. Enabled by default, bounded by its own
+  # per-run reservation budget so a workflow cannot fan verification out without a ceiling.
+  WORKFLOW_VERIFY="${CLAUDE_FUSION_WORKFLOW_VERIFY:-1}"
+  WORKFLOW_VERIFY_LIMIT="$(clf_positive_int "${CLAUDE_FUSION_WORKFLOW_VERIFY_LIMIT:-2}" 2)"
   DEPTH="${CLAUDE_FUSION_DEPTH:-workflow}"         # workflow (deeper pass) | single (one-shot)
+  # Ultra Code: ask Claude for xhigh-effort dynamic workflows (multi-agent read-only orchestration)
+  # instead of one single-agent pass. The Task/Workflow/ToolSearch tools and the `ultracode:` keyword
+  # are Claude Code built-ins, so this is independent of safe mode: a build that does not expose them
+  # degrades to a single deep pass rather than failing.
+  ULTRACODE="${CLAUDE_FUSION_ULTRACODE:-1}"        # 1 = ultracode + dynamic workflows | 0 = single agent
+  # Internal, never read from the environment: a hook sets it to 0 to force one Claude agent even in
+  # ultracode mode. Initialized here so an inherited CLF_ALLOW_FANOUT cannot widen or narrow a hook.
+  CLF_ALLOW_FANOUT=1
   TOOLSMODE="${CLAUDE_FUSION_TOOLS:-readonly}"     # readonly (explore repo) | none (--tools "", baked-in only)
   SAFE_MODE="${CLAUDE_FUSION_SAFE_MODE:-1}"        # 1 isolates Claude customizations; 0 allows CLAUDE.md/memory/skills/workflows
   CLAUDE_SAFE_ARGS=(--safe-mode)
@@ -59,6 +72,11 @@ clf_enabled() {
   case "$1" in 1|true|True|TRUE|yes|Yes|YES|on|On|ON) return 0;; *) return 1;; esac
 }
 
+clf_ultracode_enabled() {
+  # Ultra Code only applies to the deeper `workflow` consultation depth; `single` stays one-shot.
+  [ "$DEPTH" = "workflow" ] && clf_enabled "$ULTRACODE"
+}
+
 clf_ensure_state_dir() {
   mkdir -p -m 700 "$STATE_DIR" 2>/dev/null || return 1
   [ ! -L "$STATE_DIR" ] || return 1
@@ -72,12 +90,47 @@ clf_dbg() {
   printf '%s %s: %s\n' "$$" "$CLF_LOG_PREFIX" "$*" >>"$STATE_DIR/debug.log"
 }
 
-clf_nested_fusion_active() {
+clf_peer_fusion_active() {
   # Both Fusion directions set their flag before shelling out to the peer (env inherited through the
-  # process tree); honoring either breaks any claude<->codex hook loop when both are installed.
-  # codex-dw marks every SDK leaf worker too, so workflow-owned lifecycle events cannot recursively
-  # trigger another cross-model consultation outside the parent workflow budget.
-  [ "${CLAUDE_FUSION_ACTIVE:-0}" = "1" ] || [ "${CODEX_FUSION_ACTIVE:-0}" = "1" ] || [ "${CODEX_DW_ACTIVE:-0}" = "1" ]
+  # process tree); honoring either breaks any claude<->codex hook loop when both are installed. This
+  # is the hard loop guard: no hook may ever ignore it.
+  [ "${CLAUDE_FUSION_ACTIVE:-0}" = "1" ] || [ "${CODEX_FUSION_ACTIVE:-0}" = "1" ]
+}
+
+clf_workflow_worker() {
+  # codex-dw marks every SDK leaf worker. Prompt analysis and final-diff review stay suppressed here
+  # (the workflow coordinator owns those), but SubagentStop may opt in as an adversarial verifier
+  # under its own bounded budget.
+  [ "${CODEX_DW_ACTIVE:-0}" = "1" ]
+}
+
+clf_nested_fusion_active() {
+  clf_peer_fusion_active || clf_workflow_worker
+}
+
+clf_workflow_budget_key() {
+  # Prefer a run-scoped key so one verification budget covers the whole workflow; codex-dw exports a
+  # run id when it can. Fall back to the worker's own turn/session key, which still bounds each
+  # worker. Printed empty when nothing identifies the caller, and the hook then declines to verify.
+  # Reservation names use the `workflow-` namespace (see clf_reserve_dir), so this key never collides
+  # with an interactive turn's `subagent-` reservations even for identical identifiers.
+  _wb_run="$(clf_sanitize_session_id "${CODEX_DW_RUN_ID:-}")"
+  [ -n "$_wb_run" ] && { printf '%s' "$_wb_run"; return 0; }
+  _wb_turn="$(clf_turn_key "$1" "$2" 2>/dev/null)" || _wb_turn=""
+  printf '%s' "$_wb_turn"
+}
+
+clf_reserve_dir() {
+  # $1 = namespace (subagent | workflow), $2 = budget key, $3 = agent|slot, $4 = id.
+  printf '%s/%s.%s-%s-%s' "$STATE_DIR" "$2" "$1" "$3" "$4"
+}
+
+clf_cleanup_stale_workflow_reservations() {
+  # Workflow reservations are not owned by any Stop-hook turn, so sweep long-idle empty ones instead
+  # of leaking them. Half a day is far longer than any single codex-dw run.
+  [ -d "$STATE_DIR" ] || return 0
+  find "$STATE_DIR" -maxdepth 1 -type d -name '*.workflow-*' -empty -mmin +720 -delete 2>/dev/null
+  return 0
 }
 
 clf_setup_claude_runtime() {
@@ -357,7 +410,11 @@ clf_build_claude_args() {
     CLAUDE_TOOL_ARGS=(--tools "")
   else
     _ba_allow="Read Grep Glob Bash(git status:*) Bash(git diff:*) Bash(git log:*) Bash(git show:*) Bash(ls:*) Bash(cat:*)"
-    [ "$DEPTH" = "workflow" ] && [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ] && _ba_allow="$_ba_allow Task Workflow ToolSearch"
+    # CLF_ALLOW_FANOUT=0 keeps a single Claude agent even in ultracode mode. Verification running
+    # inside a codex-dw worker uses it so one worker cannot expand into a nested Claude fan-out.
+    if clf_ultracode_enabled && [ "$CLF_ALLOW_FANOUT" = "1" ]; then
+      _ba_allow="$_ba_allow Task Workflow ToolSearch"
+    fi
     CLAUDE_TOOL_ARGS=(--allowedTools "$_ba_allow")
   fi
   clf_set_claude_args "$CLAUDE_MODEL" "$CLAUDE_EFFORT" text
@@ -401,7 +458,7 @@ clf_run_claude() {
 
 clf_run_claude_with_retry() {
   # Sets CLF_OUTPUT / CLF_RC. On a fast failure (e.g. unknown model/effort), retry once with the
-  # fixed Opus/xhigh fallback. KEEP the tool sandbox so a retry can never widen Claude's access.
+  # fixed fallback model/effort. KEEP the tool sandbox so a retry can never widen Claude's access.
   # Timeouts (rc 124) are not retried.
   CLF_OUTPUT="$(clf_run_claude)"
   CLF_RC=$?

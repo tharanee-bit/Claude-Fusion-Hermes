@@ -28,8 +28,10 @@ Reconcile its advice about coverage, independent roles, budgets, barriers, autho
 stop gates, and terminal artifacts with the Codex/Dynamic Workflows plan. Claude Fusion must not
 launch duplicate fan-out or a nested `codex-dw` run; Dynamic Workflows remains the coordinator.
 
-`CLAUDE_FUSION_DEPTH=workflow` means a deep Claude consultation. It does **not** invoke or replace
-the `codex-dw` runtime.
+By default Claude is consulted as the latest Opus at `xhigh` effort in Ultra Code mode, so its
+analysis and reviews come from a read-only multi-agent pass rather than a single agent.
+`CLAUDE_FUSION_DEPTH=workflow` and `CLAUDE_FUSION_ULTRACODE=1` describe that Claude-side
+consultation only. Neither invokes nor replaces the `codex-dw` runtime.
 
 ## Clarification questions
 Claude may attach up to three structured questions to its analysis. Before asking the user:
@@ -43,10 +45,16 @@ Claude may attach up to three structured questions to its analysis. Before askin
    `autoResolutionMs` entirely. If no interactive question tool is available, end the turn with the
    unresolved questions and wait for the user.
 
-## Subagent review
-If a **SUBAGENT REVIEW** block appears, correct the serious issue before allowing that subagent to
-finish, or explicitly justify why the finding is inapplicable. Subagent reviews do not replace the
-main Stop-hook review of the final repository diff.
+## Subagent review (adversarial verification)
+A **SUBAGENT REVIEW** block means Claude ran as an independent adversarial verifier against that
+subagent's result and refuted part of it. Correct the finding before allowing the subagent to finish,
+or explicitly justify why it does not hold. Claude is instructed to report only defects it can point
+to concretely, so treat a finding as a real refutation rather than a style opinion — but you remain
+the final judge.
+
+This verification also runs for `codex-dw` workers during multiagent orchestration, where Claude
+verifies one worker's result per reserved slot and never fans out or reviews the whole run. It is a
+per-worker gate, not a substitute for the main Stop-hook review of the final repository diff.
 
 ## Post-diff review (Stop hook)
 If a **POST-DIFF REVIEW** from Claude appears, address every serious issue (correctness, security,

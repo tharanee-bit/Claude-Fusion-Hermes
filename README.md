@@ -16,10 +16,14 @@ primary and Claude advises**. It uses Codex **hooks**:
   [Codex Dynamic Workflows](https://github.com/tharanee-bit/Codex-Dynamic-Workflows). If Claude flags
   serious problems (correctness, security, data-loss, concurrency, broken tests), Codex is asked to
   address them before finalizing.
-- **Whenever a subagent finishes** under that gated parent turn, a `SubagentStop` hook reviews its
-  capped final message and the filtered parent-turn diff when present. Research-only agents are
-  included. Duplicate events are deduplicated and at most two unique subagents are reviewed by
-  default; the main final-diff review still runs.
+- **Whenever a subagent finishes** under that gated parent turn, a `SubagentStop` hook runs Claude as
+  an **adversarial verifier** over its capped final message and the filtered parent-turn diff when
+  present: Claude tries to refute the subagent's claims instead of summarizing them. Research-only
+  agents are included, and the same verification runs for
+  [Codex Dynamic Workflows](https://github.com/tharanee-bit/Codex-Dynamic-Workflows) workers during
+  multiagent orchestration. Duplicate events are deduplicated and at most two unique subagents are
+  verified per parent turn by default, under a separate budget from workflow workers; the main
+  final-diff review still runs.
 
 Codex stays the editor and the final judge. Claude only advises and reviews - it is always
 **read-only** and never edits your files.
@@ -43,7 +47,8 @@ Codex stays the editor and the final judge. Claude only advises and reviews - it
         v
    Codex synthesizes Codex + Claude, then edits
         |
-        +--> SubagentStop (up to 2 unique agents) --> PASS or continue that subagent
+        +--> SubagentStop adversarial verification (2 unique agents per turn, plus a
+        |    separate codex-dw worker budget) --> PASS or continue that subagent
         |
         v
    Stop hook -- active diff or matching codex-dw artifact? --no--> (Codex finishes)
@@ -75,7 +80,7 @@ ignored fail-open; Claude Fusion never merges or modifies the integration branch
 Claude Code clients that support `--output-format json` and `--json-schema` use validated JSON
 envelopes for both analysis and review. Non-success envelopes, `is_error`, malformed JSON, and
 missing or invalid `structured_output` are failed attempts. Older clients keep the two-attempt text
-path. After two malformed structured attempts, Claude Fusion makes one final fixed-Opus text
+path. After two malformed structured attempts, Claude Fusion makes one final fixed-fallback text
 attempt. Timeouts are never retried.
 
 ## Requirements
@@ -138,35 +143,43 @@ absolute paths in `--legacy` mode, so this caveat only applies to a manual merge
 | Knob | Default | Effect |
 |---|---|---|
 | `[no-claude]` in your prompt | - | Skips Claude entirely for that prompt. |
-| `CLAUDE_FUSION_MODEL` | `fable` | Primary Claude model. Defaults to the latest Fable alias; overrides affect only the first attempt. |
+| `CLAUDE_FUSION_MODEL` | `opus` | Primary Claude model. Defaults to the latest Opus alias (Opus 5); overrides affect only the first attempt. |
 | `CLAUDE_FUSION_EFFORT` | `xhigh` | Primary reasoning effort (`low` / `medium` / `high` / `xhigh` / `max`); overrides affect only the first attempt. |
-| `CLAUDE_FUSION_DEPTH` | `workflow` | `workflow` = ask Claude for a deeper read-only consultation; `single` = one-shot analysis (faster). This is Claude consultation depth, not the `codex-dw` runtime. With the default safe mode, it stays isolated. |
+| `CLAUDE_FUSION_DEPTH` | `workflow` | `workflow` = ask Claude for a deeper read-only consultation; `single` = one-shot analysis (faster, and disables Ultra Code). This is Claude consultation depth, not the `codex-dw` runtime. |
+| `CLAUDE_FUSION_ULTRACODE` | `1` | `1` = Ultra Code: prefix the consultation with `ultracode:` and allow the built-in `Task` / `Workflow` / `ToolSearch` tools so Claude answers with a read-only multi-agent pass. `0` = one Claude agent. Requires `CLAUDE_FUSION_DEPTH=workflow`; a Claude Code build without those tools degrades to a single deep pass. |
 | `CLAUDE_FUSION_TOOLS` | `readonly` | `readonly` = Claude can read/grep/glob + read-only git to explore the repo; `none` = `--tools ""` (analyze only the injected prompt + git status/diff). |
-| `CLAUDE_FUSION_SAFE_MODE` | `1` | `1` = run Claude with `--safe-mode`, preventing `CLAUDE.md`, memory, skills, plugins, workflows, MCP servers, and custom agents from leaking into the consult. If your Claude Code build does not support `--safe-mode`, the hook skips rather than falling back to custom context. `0` = allow local Claude customizations, including ultracode/dynamic workflows. |
+| `CLAUDE_FUSION_SAFE_MODE` | `1` | `1` = run Claude with `--safe-mode`, preventing `CLAUDE.md`, memory, skills, plugins, *saved* workflows, MCP servers, and custom agents from leaking into the consult. If your Claude Code build does not support `--safe-mode`, the hook skips rather than falling back to custom context. `0` = allow those local Claude customizations. Ultra Code does not need this: it uses built-in tools only. |
 | `CLAUDE_FUSION_CONTINUITY` | `0` | `1` = persist and resume only the UserPromptSubmit Claude session. Invalid saved sessions are discarded and retried fresh. Stop and SubagentStop reviews always remain fresh. |
-| `CLAUDE_FUSION_SUBAGENT_REVIEW` | `1` | `0` disables SubagentStop review without disabling pre-prompt or final review. |
-| `CLAUDE_FUSION_SUBAGENT_REVIEW_LIMIT` | `2` | Maximum unique subagent reviews atomically reserved per gated parent turn. |
+| `CLAUDE_FUSION_SUBAGENT_REVIEW` | `1` | `0` disables all SubagentStop verification (interactive turns and workflow workers) without disabling pre-prompt or final review. |
+| `CLAUDE_FUSION_SUBAGENT_REVIEW_LIMIT` | `2` | Maximum unique subagent verifications atomically reserved per gated parent turn. |
+| `CLAUDE_FUSION_WORKFLOW_VERIFY` | `1` | `1` = also verify `codex-dw` worker subagents during multiagent orchestration. `0` = restore the previous behaviour, where a `CODEX_DW_ACTIVE=1` environment suppresses every lifecycle hook. |
+| `CLAUDE_FUSION_WORKFLOW_VERIFY_LIMIT` | `2` | Maximum unique worker verifications reserved per workflow run when `codex-dw` exports `CODEX_DW_RUN_ID`, otherwise per worker session - so a wide fan-out can exceed this in total. Lower it to `1` if orchestration cost matters more than coverage. |
 | `CLAUDE_FUSION_TIMEOUT` | `600` (workflow) / `300` (single) | Shared whole-hook budget (seconds) across all Claude attempts; values above 630 are capped so cleanup completes before Codex's 660s hook timeout. |
 | `CLAUDE_FUSION_STOP_RETRY_LIMIT` | `2` | Transient failed Stop-review attempts for an unchanged diff before skipping until the diff changes. |
 | `CLAUDE_FUSION_EXCLUDE` | - | Extra space-separated globs to exclude from the status/diff sent to Claude, on top of the built-in sensitive-path denylist (globs containing spaces are unsupported). |
 | `CLAUDE_FUSION_MAX_FILE_BYTES` | `409600` | Per-file size cap; changed files larger than this are dropped from the diff payload. |
 | `CLAUDE_FUSION_DEBUG=1` | off | Logs gate/flow to `${TMPDIR:-/tmp}/claude-fusion-state-<uid>/debug.log`. |
 
-> **Fable first, latest Opus fallback, isolated by default.** Claude Fusion first runs the latest
-> Fable at `xhigh`. Structured-capable clients then try the latest Opus alias at `xhigh`, followed
-> by one final Opus text attempt after malformed structured exhaustion. Older clients retain the
-> original two-attempt Fable/Opus text path. The fallback is fixed even when the primary model or
-> effort is overridden. All attempts share one bounded wall-clock budget; timeouts are not retried.
-> By default, Claude Code `--safe-mode` keeps the consult
-> focused on the injected task and repository context rather than your personal Claude setup.
-> **This costs latency:** a complex prompt waits for Claude (often 1-3 minutes, sometimes longer in
-> `workflow` mode) before Codex responds. To deliberately trade isolation for local Claude
-> workflows, set
-> `CLAUDE_FUSION_SAFE_MODE=0`. To trade quality for speed, set `CLAUDE_FUSION_DEPTH=single`, lower
-> `CLAUDE_FUSION_EFFORT`, or use `[no-claude]` to skip a given prompt. The hook-registration timeout
-> in `hooks.json` (660s) sits above the maximum 630-second shared budget; if your Codex build caps
-> hook timeouts lower and `workflow` analyses get killed, use
-> `single` mode or a smaller `CLAUDE_FUSION_TIMEOUT`.
+> **Opus 5 at `xhigh` in Ultra Code by default, latest Fable as the fixed fallback, isolated.**
+> Every automatic consultation asks the latest Opus alias for an `xhigh`-effort *dynamic workflows*
+> pass: Claude Fusion prefixes the prompt with `ultracode:` and allows the built-in
+> `Task` / `Workflow` / `ToolSearch` tools, so analysis and review come from a read-only multi-agent
+> run instead of one agent. Those tools are Claude Code built-ins, so Ultra Code does not require
+> turning safe mode off; a build that does not expose them simply degrades to a single deep pass.
+> On a fast failure, structured-capable clients retry with the latest Fable alias at `xhigh`,
+> followed by one final Fable text attempt after malformed structured exhaustion. Older clients
+> retain the original two-attempt Opus/Fable text path. The fallback is fixed even when the primary
+> model or effort is overridden. All attempts share one bounded wall-clock budget; timeouts are not
+> retried. Claude Code `--safe-mode` keeps the consult focused on the injected task and repository
+> context rather than your personal Claude setup.
+> **This costs latency and tokens:** a complex prompt waits for a multi-agent Opus pass (often
+> several minutes) before Codex responds. To trade quality for speed, set
+> `CLAUDE_FUSION_ULTRACODE=0` (single agent), `CLAUDE_FUSION_DEPTH=single` (one-shot, also disables
+> Ultra Code), lower `CLAUDE_FUSION_EFFORT`, or use `[no-claude]` to skip a given prompt. To
+> deliberately trade isolation for your local Claude setup — saved workflows, skills, memory, MCP
+> servers — set `CLAUDE_FUSION_SAFE_MODE=0`. The hook-registration timeout in `hooks.json` (660s)
+> sits above the maximum 630-second shared budget; if your Codex build caps hook timeouts lower and
+> `workflow` analyses get killed, use `single` mode or a smaller `CLAUDE_FUSION_TIMEOUT`.
 
 ### The trigger gate
 
@@ -187,10 +200,12 @@ orchestrator.
 - Claude always runs `--permission-mode plan` (it cannot edit files) and, by default,
   `--no-session-persistence`, `--safe-mode`, and read-only tools. The only persistence exception is
   explicit `CLAUDE_FUSION_CONTINUITY=1`, and that applies only to pre-prompt analysis, never either
-  review hook. Safe mode prevents Claude Code from loading
-  `CLAUDE.md`, memory, skills, plugins, workflows, MCP servers, and custom agents into the automatic
-  consult. (The `--safe-mode` capability probe is cached per resolved `claude` binary, so it does not
-  re-run `claude --help` on every prompt; updates invalidate the cache automatically.)
+  review hook. Safe mode prevents Claude Code from loading `CLAUDE.md`, memory, skills, plugins,
+  *saved* workflows, MCP servers, and custom agents into the automatic consult. Ultra Code is
+  unaffected by that isolation because it only uses the built-in `Task` / `Workflow` / `ToolSearch`
+  tools, and every agent those spawn inherits the same `--permission-mode plan` sandbox and tool
+  allowlist. (The `--safe-mode` capability probe is cached per resolved `claude` binary, so it does
+  not re-run `claude --help` on every prompt; updates invalidate the cache automatically.)
 - **Sensitive paths never reach Claude in the harness payload.** The `git status` and diff the hooks
   embed are filtered at the source against a denylist of secret-bearing paths (env files, keys and
   certificates, `credentials*`/`secrets*`, shell history, `.netrc`/`.npmrc`/`.pypirc`, `auth.json`,
@@ -210,7 +225,13 @@ orchestrator.
 - `SubagentStop` never reads `agent_transcript_path`. It sends only agent metadata, at most 12,000
   characters of `last_assistant_message`, and a size-capped diff that uses the same sensitive-path
   filtering. Unique-agent and slot directories are created atomically so duplicate events cannot
-  consume a second slot. `ISSUES_FOUND` continues that subagent; failures remain fail-open.
+  consume a second slot. `ISSUES_FOUND` continues that subagent; failures remain fail-open. Claude is
+  told to refute claims but to report only defects it can point to concretely, so an unverifiable
+  claim is reported inside a `PASS` rather than blocking the subagent. Verifying a native Codex
+  subagent uses Ultra Code like any other consultation; verifying a `codex-dw` worker is forced to a
+  single Claude agent with the `Task` / `Workflow` / `ToolSearch` tools withheld, so fan-out is never
+  nested inside fan-out. An explicit Dynamic Workflows prompt has those tools withheld for the same
+  reason.
 - Claude may propose at most three structured `required` or `advisory` questions. Injected context
   and the bundled skill require Codex to inspect repo truth first, merge duplicates, ask all
   remaining required questions, and omit `autoResolutionMs` entirely. Without an interactive
@@ -218,11 +239,17 @@ orchestrator.
 - **Loop-safe with Codex Fusion and Dynamic Workflows.** If you also run
   [Codex Fusion](https://github.com/tharanee-bit/Codex-Fusion) (Claude -> Codex), Claude Fusion
   exports `CLAUDE_FUSION_ACTIVE=1` and `CODEX_FUSION_ACTIVE=1` when it calls Claude and
-  short-circuits at the top of every hook when either variable is set. Dynamic Workflows marks SDK
-  leaf workers with `CODEX_DW_ACTIVE=1`; Claude Fusion suppresses all lifecycle behavior in that
-  environment so worker execution cannot create nested, unbudgeted cross-model work. Native Codex
-  subagents keep the normal bounded `SubagentStop` behavior. (Independently, `codex exec` - which
-  Codex Fusion uses - does not fire Codex lifecycle hooks.)
+  short-circuits at the top of every hook when either variable is set. That guard is absolute and no
+  hook may ignore it. Dynamic Workflows marks SDK leaf workers with `CODEX_DW_ACTIVE=1`; in that
+  environment `UserPromptSubmit` analysis and the final `Stop` review stay suppressed (the workflow
+  coordinator owns those), and `SubagentStop` verification is the single exception - it runs against
+  worker results under its own slot budget, never launches a Claude workflow or nested `codex-dw`
+  run, and can be disabled with `CLAUDE_FUSION_WORKFLOW_VERIFY=0`. That budget is shared across the
+  whole run when Dynamic Workflows exports `CODEX_DW_RUN_ID`; otherwise it is per worker session, so
+  a wide fan-out can verify more than `CLAUDE_FUSION_WORKFLOW_VERIFY_LIMIT` times in total. Because Claude Fusion
+  exports only the two Fusion-active flags when it shells out, a verification pass can never
+  recursively trigger another one. (Independently, `codex exec` - which Codex Fusion uses - does not
+  fire Codex lifecycle hooks.)
 
 ## Test it
 
@@ -274,7 +301,7 @@ Other hooks and settings are untouched, and changed `hooks.json` files are backe
 
 ```
 .agents/plugins/marketplace.json                    # repo marketplace named claude-fusion
-plugins/claude-fusion/.codex-plugin/plugin.json     # v0.1.2 plugin manifest
+plugins/claude-fusion/.codex-plugin/plugin.json     # v0.1.3 plugin manifest
 plugins/claude-fusion/hooks/hooks.json              # default-discovered three-hook registration
 plugins/claude-fusion/hooks/*.sh                    # canonical runtime
 plugins/claude-fusion/skills/claude-fusion-auto/    # authoritative synthesis/question skill
