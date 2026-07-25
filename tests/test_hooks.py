@@ -271,6 +271,7 @@ class HookTestCase(unittest.TestCase):
                 "CLAUDE_FUSION_ACTIVE",
                 "CODEX_FUSION_ACTIVE",
                 "CODEX_DW_ACTIVE",
+                "CODEX_DW_RUN_ID",
                 "CODEX_HOME",
             ):
                 env.pop(key)
@@ -478,7 +479,7 @@ class HookTestCase(unittest.TestCase):
         self.assertIn("analysis from fake claude", context)
         consults = self.consults()
         self.assertEqual(len(consults), 1)
-        self.assertEqual((consults[0]["model"], consults[0]["effort"]), ("fable", "xhigh"))
+        self.assertEqual((consults[0]["model"], consults[0]["effort"]), ("opus", "xhigh"))
         marker = self.marker("gate")
         self.assertTrue(marker.exists())
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), self.head_sha())
@@ -495,7 +496,7 @@ class HookTestCase(unittest.TestCase):
         context = json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("analysis from fake claude", context)
         consults = self.consults()
-        self.assertEqual([entry["model"] for entry in consults], ["sonnet", "opus"])
+        self.assertEqual([entry["model"] for entry in consults], ["sonnet", "fable"])
         self.assertEqual([entry["effort"] for entry in consults], ["low", "xhigh"])
 
     def test_gate_skips_trivial_conversational_and_escape_hatch(self):
@@ -538,30 +539,128 @@ class HookTestCase(unittest.TestCase):
         self.assertIn("terminal artifact", consult["prompt"])
         self.assertIn("Do not launch a duplicate Claude workflow", consult["prompt"])
         self.assertIn("nested codex-dw run", consult["prompt"])
+        argv = consult["argv"]
+        allowed = argv[argv.index("--allowedTools") + 1]
+        for tool in ("Task", "Workflow", "ToolSearch"):
+            self.assertNotIn(tool, allowed, "an explicit codex-dw request must not get fan-out tools")
 
-    def test_codex_dw_worker_environment_suppresses_all_lifecycle_hooks(self):
+    def test_codex_dw_worker_suppresses_prompt_and_final_review_but_verifies_subagents(self):
         artifact = self.create_artifact("dw-worker", "worker-artifact")
         prompt = self.run_hook(
             USERPROMPT_HOOK,
             {"prompt": GATED_PROMPT, "cwd": str(self.repo), "session_id": "dw-worker"},
             CODEX_DW_ACTIVE="1",
         )
-        subagent = self.run_hook(
+        stop = self.stop("dw-worker", CODEX_DW_ACTIVE="1")
+        for result in (prompt, stop):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "")
+        self.assertEqual(self.consults(), [], "workers must not run prompt analysis or the final review")
+        self.assertNotIn((artifact["id"], artifact["headCommit"]), self.artifact_receipts("dw-worker"))
+
+        # Verification is the one lifecycle behavior that survives inside a worker, and it needs no
+        # parent UserPromptSubmit marker because the workflow run itself is the gate.
+        self.assertFalse(self.marker("dw-worker").exists())
+        verified = self.run_hook(
             SUBAGENT_STOP_HOOK,
             {
                 "cwd": str(self.repo),
                 "session_id": "dw-worker",
                 "agent_id": "worker-child",
-                "last_assistant_message": "result",
+                "last_assistant_message": "I refactored the parser and all tests pass.",
             },
             CODEX_DW_ACTIVE="1",
         )
-        stop = self.stop("dw-worker", CODEX_DW_ACTIVE="1")
-        for result in (prompt, subagent, stop):
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, "")
-        self.assertEqual(self.consults(), [])
-        self.assertNotIn((artifact["id"], artifact["headCommit"]), self.artifact_receipts("dw-worker"))
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        consults = self.consults()
+        self.assertEqual(len(consults), 1)
+        argv, verify_prompt = consults[0]["argv"], consults[0]["prompt"]
+        self.assertIn("try to REFUTE", verify_prompt)
+        self.assertIn("codex-dw", verify_prompt)
+        self.assertIn("I refactored the parser", verify_prompt)
+        self.assertFalse(
+            verify_prompt.startswith("ultracode: "),
+            "verification inside a workflow worker must stay a single agent",
+        )
+        allowed = argv[argv.index("--allowedTools") + 1]
+        for tool in ("Task", "Workflow", "ToolSearch"):
+            self.assertNotIn(tool, allowed, "a worker must not expand into a nested Claude fan-out")
+
+    def test_codex_dw_verification_is_run_budgeted_and_can_be_disabled(self):
+        def worker_stop(agent_id, session="dw-run", **env):
+            return self.run_hook(
+                SUBAGENT_STOP_HOOK,
+                {
+                    "cwd": str(self.repo),
+                    "session_id": session,
+                    "agent_id": agent_id,
+                    "last_assistant_message": "worker result",
+                },
+                CODEX_DW_ACTIVE="1",
+                **env,
+            )
+
+        off = worker_stop("opted-out", CLAUDE_FUSION_WORKFLOW_VERIFY="0")
+        self.assertEqual(off.stdout, "")
+        self.assertEqual(self.consults(), [], "CLAUDE_FUSION_WORKFLOW_VERIFY=0 restores full suppression")
+
+        # One shared budget across the run when codex-dw exports a run id, even though each worker
+        # arrives with its own session id.
+        for index, session in enumerate(("worker-a", "worker-b", "worker-c"), start=1):
+            res = worker_stop(f"agent-{index}", session=session, CODEX_DW_RUN_ID="run-42")
+            self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(self.consults()), 2, "the run-scoped cap must bound the whole workflow")
+        self.assertEqual(
+            sorted(p.name for p in self.state_dir().glob("run-42.workflow-slot-*")),
+            ["run-42.workflow-slot-1", "run-42.workflow-slot-2"],
+        )
+        self.assertEqual(
+            list(self.state_dir().glob("*.subagent-*")),
+            [],
+            "workflow reservations must not share a namespace with interactive turn reservations",
+        )
+
+        self.clear_log()
+        duplicate = worker_stop("agent-dup", session="worker-d", CODEX_DW_RUN_ID="run-77")
+        repeat = worker_stop("agent-dup", session="worker-e", CODEX_DW_RUN_ID="run-77")
+        for res in (duplicate, repeat):
+            self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertEqual(len(self.consults()), 1, "a re-delivered worker event must not consume a slot")
+
+    def test_ultracode_is_the_default_consultation_mode(self):
+        res = self.run_hook(
+            USERPROMPT_HOOK, {"prompt": GATED_PROMPT, "cwd": str(self.repo), "session_id": "ultra"}
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        consult = self.consults()[0]
+        self.assertEqual((consult["model"], consult["effort"]), ("opus", "xhigh"))
+        self.assertTrue(consult["prompt"].startswith("ultracode: "))
+        self.assertIn("multi-agent analysis (dynamic workflows", consult["prompt"])
+        argv = consult["argv"]
+        allowed = argv[argv.index("--allowedTools") + 1]
+        for tool in ("Task", "Workflow", "ToolSearch"):
+            self.assertIn(tool, allowed, "ultracode must not require turning safe mode off")
+        self.assertIn("--safe-mode", argv, "ultracode keeps the isolation default")
+
+    def test_ultracode_opt_out_and_single_depth_stay_one_agent(self):
+        for label, env in (
+            ("explicit-off", {"CLAUDE_FUSION_ULTRACODE": "0"}),
+            ("single-depth", {"CLAUDE_FUSION_DEPTH": "single"}),
+        ):
+            with self.subTest(mode=label):
+                self.clear_log()
+                res = self.run_hook(
+                    USERPROMPT_HOOK,
+                    {"prompt": GATED_PROMPT, "cwd": str(self.repo), "session_id": f"solo-{label}"},
+                    **env,
+                )
+                self.assertEqual(res.returncode, 0, res.stderr)
+                consult = self.consults()[0]
+                self.assertFalse(consult["prompt"].startswith("ultracode: "))
+                argv = consult["argv"]
+                allowed = argv[argv.index("--allowedTools") + 1]
+                for tool in ("Task", "Workflow", "ToolSearch"):
+                    self.assertNotIn(tool, allowed)
 
     def test_marker_lifecycle_pass_consumes_marker(self):
         self.gate("pass")
@@ -594,10 +693,10 @@ class HookTestCase(unittest.TestCase):
     def test_retry_on_failure_not_on_timeout(self):
         self.gate("retry")
         self.modify_repo()
-        res = self.stop("retry", FAKE_CLAUDE_FAIL_MODEL="fable")
+        res = self.stop("retry", FAKE_CLAUDE_FAIL_MODEL="opus")
         self.assertEqual(res.returncode, 0, res.stderr)
         consults = self.consults()
-        self.assertEqual([entry["model"] for entry in consults], ["fable", "opus"])
+        self.assertEqual([entry["model"] for entry in consults], ["opus", "fable"])
         self.assertEqual([entry["effort"] for entry in consults], ["xhigh", "xhigh"])
 
         def allowed_tools(argv):
@@ -632,13 +731,13 @@ class HookTestCase(unittest.TestCase):
         res = self.stop(
             "budget",
             FAKE_CLAUDE_MALFORMED="1",
-            FAKE_CLAUDE_SLEEP_OPUS="3",
+            FAKE_CLAUDE_SLEEP_FABLE="3",
             CLAUDE_FUSION_TIMEOUT="2",
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(
             [entry["model"] for entry in self.consults()],
-            ["fable", "opus"],
+            ["opus", "fable"],
             "the timed-out fallback must consume the shared budget before a final text attempt starts",
         )
         self.assertTrue(self.marker("budget").exists())
@@ -1159,7 +1258,7 @@ class HookTestCase(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertIn("analysis from fake claude", res.stdout)
                 consults = self.consults()
-                self.assertEqual([c["model"] for c in consults], ["fable", "opus", "opus"])
+                self.assertEqual([c["model"] for c in consults], ["opus", "fable", "fable"])
                 self.assertEqual(
                     [c["argv"][c["argv"].index("--output-format") + 1] for c in consults],
                     ["json", "json", "text"],
@@ -1170,11 +1269,11 @@ class HookTestCase(unittest.TestCase):
             USERPROMPT_HOOK,
             {"prompt": GATED_PROMPT, "cwd": str(self.repo), "session_id": "legacy-client"},
             FAKE_CLAUDE_NO_STRUCTURED="1",
-            FAKE_CLAUDE_FAIL_MODEL="fable",
+            FAKE_CLAUDE_FAIL_MODEL="opus",
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         consults = self.consults()
-        self.assertEqual([c["model"] for c in consults], ["fable", "opus"])
+        self.assertEqual([c["model"] for c in consults], ["opus", "fable"])
         self.assertTrue(all("--json-schema" not in c["argv"] for c in consults))
         self.assertTrue(all(c["argv"][c["argv"].index("--output-format") + 1] == "text" for c in consults))
 
@@ -1299,7 +1398,9 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(len(consults), 1)
         prompt = consults[0]["prompt"]
         self.assertIn("Evidence-based research conclusion", prompt)
-        self.assertIn("Research-only subagents still require review", prompt)
+        self.assertIn("try to REFUTE", prompt)
+        self.assertIn("subagents still require verification", prompt)
+        self.assertNotIn("codex-dw", prompt, "an interactive parent turn is not a workflow run")
         self.assertNotIn("/MUST/NOT/BE/READ", prompt)
         self.assertNotIn("agent_transcript_path", prompt)
 
@@ -1375,7 +1476,10 @@ class HookTestCase(unittest.TestCase):
             }
         }
         (codex_dir / "hooks.json").write_text(json.dumps(seed), encoding="utf-8")
-        env = self.env()
+        # install.sh --legacy ends in the bundled doctor, which FAILs when codex is absent. Provide
+        # the same fake CLI the plugin-install tests use so this test measures the installer rather
+        # than whether the developer's machine happens to have Codex installed.
+        env = self.env(FAKE_CODEX_STATE=str(self._write_fake_codex()))
         first = subprocess.run([str(INSTALL), "--legacy"], cwd=ROOT, text=True, capture_output=True, env=env, timeout=30)
         self.assertEqual(first.returncode, 0, first.stderr)
         second = subprocess.run([str(INSTALL), "--legacy"], cwd=ROOT, text=True, capture_output=True, env=env, timeout=30)
@@ -1410,7 +1514,7 @@ class HookTestCase(unittest.TestCase):
 
         manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "claude-fusion")
-        self.assertRegex(manifest["version"], r"^0\.1\.2(?:\+codex\.[0-9A-Za-z.-]+)?$")
+        self.assertRegex(manifest["version"], r"^0\.1\.3(?:\+codex\.[0-9A-Za-z.-]+)?$")
         self.assertEqual(manifest["license"], "MIT")
         self.assertIn("Read-only analysis", manifest["interface"]["capabilities"])
         self.assertNotIn("hooks", manifest, "hooks/hooks.json must be found through default discovery")

@@ -115,24 +115,34 @@ EXPLICIT_DW=0
 printf '%s' "$PROMPT" | grep -iqE '(\$dynamic-workflows\b|\bcodex-dw\b|\bdynamic[ -]workflows?\b|\bultracode\b)' && EXPLICIT_DW=1
 WF_NOTE=""
 if [ "$EXPLICIT_DW" -eq 1 ]; then
+  # The user is already asking Codex to orchestrate. Withhold the fan-out tools as well as telling
+  # Claude not to use them, so "no duplicate fan-out" is structural rather than an instruction.
+  CLF_ALLOW_FANOUT=0
   WF_NOTE="
 Treat this explicit Dynamic Workflows request as a workflow-design review. Critique coverage, role
 independence, budgets, parallel barriers, authority boundaries, verification, stop gates, and the
 terminal artifact. Do not launch a duplicate Claude workflow, Task fan-out, or nested codex-dw run;
 the Codex/Dynamic Workflows coordinator owns execution."
-elif [ "$DEPTH" = "workflow" ] && [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ]; then
+elif clf_ultracode_enabled; then
   WF_NOTE="
 When the task is non-trivial, run a thorough READ-ONLY multi-agent analysis (dynamic workflows /
 parallel subagents) rather than a single quick pass. Do not edit files or run mutating commands."
+  [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ] || WF_NOTE="$WF_NOTE
+Claude Fusion is running you in --safe-mode, so orchestrate with the built-in Task/Workflow tools
+and do not rely on user/project Claude customizations, skills, plugins, saved workflows, memory,
+MCP servers, or custom agents."
 elif [ "$DEPTH" = "workflow" ]; then
   WF_NOTE="
-When the task is non-trivial, run a thorough READ-ONLY analysis rather than a single quick pass.
+When the task is non-trivial, run a thorough READ-ONLY analysis rather than a single quick pass."
+  [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ] || WF_NOTE="$WF_NOTE
 Claude Fusion is running you in --safe-mode, so do not rely on user/project Claude customizations,
 skills, plugins, workflows, memory, MCP servers, or custom agents."
 fi
 
+# Keep the keyword and the tools inseparable: withholding fan-out must never leave a prompt that
+# still asks Claude to orchestrate one.
 CLAUDE_PREFIX=""
-[ "$EXPLICIT_DW" -eq 0 ] && [ "$DEPTH" = "workflow" ] && [ "$CUSTOM_CLAUDE_CONTEXT" -eq 1 ] && CLAUDE_PREFIX="ultracode: "
+clf_ultracode_enabled && [ "$CLF_ALLOW_FANOUT" = "1" ] && CLAUDE_PREFIX="ultracode: "
 CLAUDE_PROMPT="${CLAUDE_PREFIX}You are Claude acting as an independent coding peer for the OpenAI Codex agent.
 
 You are running automatically from a Codex UserPromptSubmit hook, in READ-ONLY mode.
@@ -184,7 +194,7 @@ if clf_enabled "$CONTINUITY" && [ -n "$SESSION_ID" ] && clf_resume_supported; th
     [ -n "$CLF_RESUME_ID" ] || rm -f "$CLF_RESUME_FILE" 2>/dev/null
   fi
 fi
-clf_dbg "running claude (model=$CLAUDE_MODEL, effort=$CLAUDE_EFFORT, depth=$DEPTH, tools=$TOOLSMODE, cwd=$CWD, words=$WORDS)"
+clf_dbg "running claude (model=$CLAUDE_MODEL, effort=$CLAUDE_EFFORT, depth=$DEPTH, ultracode=$ULTRACODE, tools=$TOOLSMODE, cwd=$CWD, words=$WORDS)"
 clf_run_claude_contract
 RC="$CLF_RC"
 [ "$RC" -eq 0 ] || { clf_dbg "claude rc=$RC -> skip"; finish_skip; }
