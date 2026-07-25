@@ -9,10 +9,10 @@ clf_init_common() {
   # Per-user state dir, mode 0700. On a shared /tmp a hostile co-tenant could otherwise pre-create a
   # predictable shared dir and read/delete our markers, so we also refuse a dir we do not own.
   STATE_DIR="${TMPDIR:-/tmp}/claude-fusion-state-$(id -u 2>/dev/null || echo 0)"
-  # Claude Fusion tries the latest Opus (Opus 5) at extra-high (xhigh) effort, then retries fast
-  # failures once with the latest Fable at xhigh. The primary model/effort can be overridden; the
-  # fallback stays fixed so a bad override still recovers on a known-good pair.
-  CLAUDE_MODEL="${CLAUDE_FUSION_MODEL:-opus}"       # latest Opus by alias (Opus 5)
+  # Claude Fusion tries Claude Opus 5 at extra-high (xhigh) effort, then retries fast failures once
+  # with the latest Fable at xhigh. The primary model/effort can be overridden; the fallback stays
+  # fixed so a bad override still recovers on a known-good pair.
+  CLAUDE_MODEL="${CLAUDE_FUSION_MODEL:-claude-opus-5}" # explicit Opus 5 model ID
   CLAUDE_EFFORT="${CLAUDE_FUSION_EFFORT:-xhigh}"   # low / medium / high / xhigh / max
   CLF_FALLBACK_MODEL="fable"                        # latest Fable by alias
   CLF_FALLBACK_EFFORT="xhigh"

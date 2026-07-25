@@ -479,7 +479,7 @@ class HookTestCase(unittest.TestCase):
         self.assertIn("analysis from fake claude", context)
         consults = self.consults()
         self.assertEqual(len(consults), 1)
-        self.assertEqual((consults[0]["model"], consults[0]["effort"]), ("opus", "xhigh"))
+        self.assertEqual((consults[0]["model"], consults[0]["effort"]), ("claude-opus-5", "xhigh"))
         marker = self.marker("gate")
         self.assertTrue(marker.exists())
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), self.head_sha())
@@ -633,7 +633,7 @@ class HookTestCase(unittest.TestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         consult = self.consults()[0]
-        self.assertEqual((consult["model"], consult["effort"]), ("opus", "xhigh"))
+        self.assertEqual((consult["model"], consult["effort"]), ("claude-opus-5", "xhigh"))
         self.assertTrue(consult["prompt"].startswith("ultracode: "))
         self.assertIn("multi-agent analysis (dynamic workflows", consult["prompt"])
         argv = consult["argv"]
@@ -693,10 +693,10 @@ class HookTestCase(unittest.TestCase):
     def test_retry_on_failure_not_on_timeout(self):
         self.gate("retry")
         self.modify_repo()
-        res = self.stop("retry", FAKE_CLAUDE_FAIL_MODEL="opus")
+        res = self.stop("retry", FAKE_CLAUDE_FAIL_MODEL="claude-opus-5")
         self.assertEqual(res.returncode, 0, res.stderr)
         consults = self.consults()
-        self.assertEqual([entry["model"] for entry in consults], ["opus", "fable"])
+        self.assertEqual([entry["model"] for entry in consults], ["claude-opus-5", "fable"])
         self.assertEqual([entry["effort"] for entry in consults], ["xhigh", "xhigh"])
 
         def allowed_tools(argv):
@@ -737,7 +737,7 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(
             [entry["model"] for entry in self.consults()],
-            ["opus", "fable"],
+            ["claude-opus-5", "fable"],
             "the timed-out fallback must consume the shared budget before a final text attempt starts",
         )
         self.assertTrue(self.marker("budget").exists())
@@ -1258,7 +1258,7 @@ class HookTestCase(unittest.TestCase):
                 self.assertEqual(res.returncode, 0, res.stderr)
                 self.assertIn("analysis from fake claude", res.stdout)
                 consults = self.consults()
-                self.assertEqual([c["model"] for c in consults], ["opus", "fable", "fable"])
+                self.assertEqual([c["model"] for c in consults], ["claude-opus-5", "fable", "fable"])
                 self.assertEqual(
                     [c["argv"][c["argv"].index("--output-format") + 1] for c in consults],
                     ["json", "json", "text"],
@@ -1269,11 +1269,11 @@ class HookTestCase(unittest.TestCase):
             USERPROMPT_HOOK,
             {"prompt": GATED_PROMPT, "cwd": str(self.repo), "session_id": "legacy-client"},
             FAKE_CLAUDE_NO_STRUCTURED="1",
-            FAKE_CLAUDE_FAIL_MODEL="opus",
+            FAKE_CLAUDE_FAIL_MODEL="claude-opus-5",
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         consults = self.consults()
-        self.assertEqual([c["model"] for c in consults], ["opus", "fable"])
+        self.assertEqual([c["model"] for c in consults], ["claude-opus-5", "fable"])
         self.assertTrue(all("--json-schema" not in c["argv"] for c in consults))
         self.assertTrue(all(c["argv"][c["argv"].index("--output-format") + 1] == "text" for c in consults))
 
@@ -1514,7 +1514,7 @@ class HookTestCase(unittest.TestCase):
 
         manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["name"], "claude-fusion")
-        self.assertRegex(manifest["version"], r"^0\.1\.3(?:\+codex\.[0-9A-Za-z.-]+)?$")
+        self.assertRegex(manifest["version"], r"^0\.1\.4(?:\+codex\.[0-9A-Za-z.-]+)?$")
         self.assertEqual(manifest["license"], "MIT")
         self.assertIn("Read-only analysis", manifest["interface"]["capabilities"])
         self.assertNotIn("hooks", manifest, "hooks/hooks.json must be found through default discovery")

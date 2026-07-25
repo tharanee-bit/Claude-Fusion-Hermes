@@ -28,8 +28,8 @@ Reconcile its advice about coverage, independent roles, budgets, barriers, autho
 stop gates, and terminal artifacts with the Codex/Dynamic Workflows plan. Claude Fusion must not
 launch duplicate fan-out or a nested `codex-dw` run; Dynamic Workflows remains the coordinator.
 
-By default Claude is consulted as the latest Opus at `xhigh` effort in Ultra Code mode, so its
-analysis and reviews come from a read-only multi-agent pass rather than a single agent.
+By default Claude is consulted with Claude Opus 5 (`claude-opus-5`) at `xhigh` effort in Ultra Code
+mode, so its analysis and reviews come from a read-only multi-agent pass rather than a single agent.
 `CLAUDE_FUSION_DEPTH=workflow` and `CLAUDE_FUSION_ULTRACODE=1` describe that Claude-side
 consultation only. Neither invokes nor replaces the `codex-dw` runtime.
 

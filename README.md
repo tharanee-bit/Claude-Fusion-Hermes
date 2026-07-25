@@ -143,7 +143,7 @@ absolute paths in `--legacy` mode, so this caveat only applies to a manual merge
 | Knob | Default | Effect |
 |---|---|---|
 | `[no-claude]` in your prompt | - | Skips Claude entirely for that prompt. |
-| `CLAUDE_FUSION_MODEL` | `opus` | Primary Claude model. Defaults to the latest Opus alias (Opus 5); overrides affect only the first attempt. |
+| `CLAUDE_FUSION_MODEL` | `claude-opus-5` | Primary Claude model. Pinned to Opus 5 because the `opus` alias can lag new releases; overrides affect only the first attempt. |
 | `CLAUDE_FUSION_EFFORT` | `xhigh` | Primary reasoning effort (`low` / `medium` / `high` / `xhigh` / `max`); overrides affect only the first attempt. |
 | `CLAUDE_FUSION_DEPTH` | `workflow` | `workflow` = ask Claude for a deeper read-only consultation; `single` = one-shot analysis (faster, and disables Ultra Code). This is Claude consultation depth, not the `codex-dw` runtime. |
 | `CLAUDE_FUSION_ULTRACODE` | `1` | `1` = Ultra Code: prefix the consultation with `ultracode:` and allow the built-in `Task` / `Workflow` / `ToolSearch` tools so Claude answers with a read-only multi-agent pass. `0` = one Claude agent. Requires `CLAUDE_FUSION_DEPTH=workflow`; a Claude Code build without those tools degrades to a single deep pass. |
@@ -161,7 +161,7 @@ absolute paths in `--legacy` mode, so this caveat only applies to a manual merge
 | `CLAUDE_FUSION_DEBUG=1` | off | Logs gate/flow to `${TMPDIR:-/tmp}/claude-fusion-state-<uid>/debug.log`. |
 
 > **Opus 5 at `xhigh` in Ultra Code by default, latest Fable as the fixed fallback, isolated.**
-> Every automatic consultation asks the latest Opus alias for an `xhigh`-effort *dynamic workflows*
+> Every automatic consultation asks `claude-opus-5` for an `xhigh`-effort *dynamic workflows*
 > pass: Claude Fusion prefixes the prompt with `ultracode:` and allows the built-in
 > `Task` / `Workflow` / `ToolSearch` tools, so analysis and review come from a read-only multi-agent
 > run instead of one agent. Those tools are Claude Code built-ins, so Ultra Code does not require
@@ -301,7 +301,7 @@ Other hooks and settings are untouched, and changed `hooks.json` files are backe
 
 ```
 .agents/plugins/marketplace.json                    # repo marketplace named claude-fusion
-plugins/claude-fusion/.codex-plugin/plugin.json     # v0.1.3 plugin manifest
+plugins/claude-fusion/.codex-plugin/plugin.json     # v0.1.4 plugin manifest
 plugins/claude-fusion/hooks/hooks.json              # default-discovered three-hook registration
 plugins/claude-fusion/hooks/*.sh                    # canonical runtime
 plugins/claude-fusion/skills/claude-fusion-auto/    # authoritative synthesis/question skill
