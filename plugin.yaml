@@ -1,0 +1,10 @@
+manifest_version: 1
+name: claude-fusion
+version: "0.1.4"
+description: Independent Claude peer analysis and verification for Hermes Agent
+kind: standalone
+provides_hooks:
+  - pre_llm_call
+  - pre_verify
+  - subagent_stop
+  - transform_tool_result

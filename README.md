@@ -1,12 +1,15 @@
 # Claude Fusion
 
-**Automatic peer review for OpenAI Codex, powered by your local Claude Code.**
+**Automatic peer review for OpenAI Codex and Hermes Agent, powered by your local Claude Code.**
 
-Claude Fusion makes [OpenAI Codex](https://github.com/openai/codex) automatically consult
+Claude Fusion makes [OpenAI Codex](https://github.com/openai/codex) or
+[Hermes Agent](https://hermes-agent.nousresearch.com/docs) automatically consult
 [Claude Code](https://claude.com/claude-code) as an independent second opinion on non-trivial coding
 tasks - *without* a slash command, and *without* you typing anything. It is the mirror image of
-[Codex Fusion](https://github.com/tharanee-bit/Codex-Fusion): there Claude is primary and Codex advises; here **Codex is
-primary and Claude advises**. It uses Codex **hooks**:
+[Codex Fusion](https://github.com/tharanee-bit/Codex-Fusion): there Claude is primary and Codex
+advises; here **Codex or Hermes is primary and Claude advises**.
+
+The original Codex integration uses Codex **hooks**:
 
 - **Before** Codex plans or edits, a `UserPromptSubmit` hook runs Claude **read-only** over your
   repo and injects Claude's independent analysis into Codex's context. Codex then reconciles its own
@@ -82,6 +85,124 @@ envelopes for both analysis and review. Non-success envelopes, `is_error`, malfo
 missing or invalid `structured_output` are failed attempts. Older clients keep the two-attempt text
 path. After two malformed structured attempts, Claude Fusion makes one final fixed-fallback text
 attempt. Timeouts are never retried.
+
+## Hermes Agent port
+
+The repository is also an installable, native Hermes plugin. It keeps Claude Code as the independent
+reviewer rather than routing the review through Hermes's active model.
+
+| Claude Fusion behavior | Hermes lifecycle integration |
+|---|---|
+| Analyze a complex prompt before work begins | `pre_llm_call` injects ephemeral context into the API-bound user message |
+| Verify a completed subagent | `subagent_stop` reviews the child; `tool_execution` middleware attaches synchronous findings on Hermes's real agent-loop path, with `transform_tool_result` retained for registry-tool compatibility |
+| Review the completed implementation | `pre_verify` reviews the prompt-time-HEAD-to-working-tree diff and returns one bounded continuation on serious findings |
+
+Claude remains advisory: the plugin invokes the authenticated `claude` CLI with plan permission
+mode, no session persistence, safe mode, and no Claude tools by default. Missing Claude,
+timeouts, malformed output, Git failures, and unsupported safe mode all fail open so Hermes can
+continue normally. Add `[no-claude]` to a prompt to skip its pre-prompt consultation.
+
+### Hermes requirements
+
+- **Hermes Agent 0.19.1 or newer** (`hermes`).
+- **Claude Code** (`claude`) installed, signed in, and new enough to support `--safe-mode`.
+- **Git** and Python 3.9 or newer.
+
+The Hermes runtime is Python-based and does not require GNU `timeout` or `grep -z`, so it works on
+macOS as well as Linux. Those GNU utilities remain requirements of the original Codex shell hooks.
+
+### Install for Hermes
+
+Install directly from GitHub with Hermes's native plugin manager:
+
+```bash
+hermes plugins install tharanee-bit/Claude-Fusion --enable
+```
+
+Or install from a checkout:
+
+```bash
+git clone https://github.com/tharanee-bit/Claude-Fusion.git
+cd Claude-Fusion
+./install-hermes.sh          # copy into the active HERMES_HOME
+./doctor-hermes.sh           # read-only diagnostics
+```
+
+Use `./install-hermes.sh --link` while developing the plugin. Copy mode installs an explicit
+allowlist of Hermes runtime, manifest, skill, and documentation files rather than archiving the
+checkout, so local untracked files are not included. Add `--force` to replace an existing
+installation. Restart running Hermes CLI, desktop, or gateway processes after installation so they
+rediscover the plugin.
+
+> **Review before enabling.** Hermes plugins execute in-process with your user permissions. The
+> native GitHub installer and `install-hermes.sh` both enable the plugin; inspect `__init__.py` and
+> `hermes-plugin/` first if this is not your checkout.
+
+### Hermes configuration
+
+Hermes-specific settings live in the active profile's `config.yaml`:
+
+```yaml
+plugins:
+  enabled:
+    - claude-fusion
+  entries:
+    claude-fusion:
+      settings:
+        model: claude-opus-5
+        effort: xhigh
+        fallback_model: fable
+        fallback_effort: xhigh
+        depth: single            # workflow requires readonly tools
+        ultracode: false         # requires workflow + readonly tools
+        tools: none              # safest default; exact explicit opt-in: readonly
+        safe_mode: true
+        timeout: 600             # shared across retries; capped at 630
+        pre_prompt: true
+        final_review: true
+        subagent_review: true
+        subagent_review_limit: 2  # clamped to 1-8
+        max_file_bytes: 409600
+        exclude: []              # additional sensitive-path globs
+```
+
+The defaults above are used when `settings` is absent. `tools: none` gives Claude only the injected
+task/status/diff payload. Only the exact string `readonly` opts into tools; unknown strings, empty or
+null values, booleans, and other malformed values normalize to `none`. `tools: readonly` enables
+unrestricted Claude Code `Read`, `Grep`, `Glob`,
+selected read-oriented Bash commands, and optional Task/Workflow fan-out. Claude Code cannot sandbox
+those tools to the filtered paths: when `readonly` is enabled, Claude can autonomously read denied
+files such as `.env` and any other file available to the user's process despite prompt instructions.
+Only enable it in a checkout whose complete readable contents are safe to disclose to Claude.
+
+In the default tool-free mode, final-review artifacts use copy-aware Git provenance checks and omit
+sensitive rename/copy sources and uncertain destinations. `max_file_bytes` applies to both the
+working-tree object and its baseline Git blob; provenance or baseline-size lookup failures omit the
+affected tracked content rather than forwarding an unsafe partial artifact.
+
+The plugin bundles the optional namespaced skill `claude-fusion:claude-fusion`, which explains how a
+Hermes agent should reconcile the injected peer review. Essential behavior is included directly in
+the hook context and does not depend on loading the skill.
+
+### Hermes compatibility limits
+
+- `subagent_stop` is observer-only in Hermes. Claude cannot reopen the child; serious findings are
+  surfaced to the parent agent instead. Background child findings are queued for the next parent
+  turn because the original asynchronous `delegate_task` result has already returned.
+- In Hermes 0.19.1, `pre_verify` is reached after Hermes-observed `write_file`/`patch` edits. Mutations
+  performed only through terminal commands, MCP/plugin tools, or the Codex app-server path may not
+  trigger the final gate.
+- Hermes 0.19.1 routes `delegate_task` around `transform_tool_result`, so Claude Fusion also uses the
+  supported `tool_execution` middleware seam. This preserves valid delegate JSON while attaching
+  synchronous orchestrator-child findings before the parent model receives the result.
+- Hermes's `tool_execution` middleware exposes the active delegate `tool_call_id`, which Claude
+  Fusion retains through synchronous `subagent_stop` review so concurrent calls cannot consume one
+  another's findings. Hook-only or asynchronous reviews without that identity are deferred when
+  identical summaries make attribution ambiguous.
+- There is no Hermes equivalent of Claude Fusion's detached Codex Dynamic Workflows artifact scan.
+
+The rest of this README's installer, environment-variable configuration, hook trust instructions,
+and Dynamic Workflows details apply to the **Codex integration**.
 
 ## Requirements
 
