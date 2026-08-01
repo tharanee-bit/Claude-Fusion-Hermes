@@ -175,26 +175,28 @@ class Settings:
         max_file_bytes: int = 409600,
         exclude: Optional[Sequence[str]] = None,
     ) -> None:
-        self.enabled = bool(enabled)
+        # Safety controls keep their documented defaults unless YAML supplies
+        # an exact boolean. Privileged modes require exact opt-in values.
+        self.enabled = enabled if isinstance(enabled, bool) else True
         self.model = str(model or "claude-opus-5")
         self.effort = str(effort or "xhigh")
         self.fallback_model = str(fallback_model or "fable")
         self.fallback_effort = str(fallback_effort or "xhigh")
-        self.depth = "single" if depth == "single" else "workflow"
-        self.ultracode = bool(ultracode) and self.depth == "workflow"
+        self.depth = "workflow" if depth == "workflow" else "single"
+        self.ultracode = ultracode is True and self.depth == "workflow"
         # Filesystem-capable tools are an explicit opt-in. Unknown strings,
         # empty values, nulls, booleans, and other malformed YAML values all
         # fail closed to the tool-free default.
         self.tools = "readonly" if tools == "readonly" else "none"
-        self.safe_mode = bool(safe_mode)
+        self.safe_mode = safe_mode if isinstance(safe_mode, bool) else True
         try:
             parsed_timeout = int(timeout)
         except (TypeError, ValueError):
             parsed_timeout = 600 if self.depth == "workflow" else 300
         self.timeout = min(630, max(1, parsed_timeout))
-        self.pre_prompt = bool(pre_prompt)
-        self.final_review = bool(final_review)
-        self.subagent_review = bool(subagent_review)
+        self.pre_prompt = pre_prompt if isinstance(pre_prompt, bool) else True
+        self.final_review = final_review if isinstance(final_review, bool) else True
+        self.subagent_review = subagent_review if isinstance(subagent_review, bool) else True
         try:
             self.subagent_review_limit = min(8, max(1, int(subagent_review_limit)))
         except (TypeError, ValueError):

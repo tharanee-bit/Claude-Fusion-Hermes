@@ -116,14 +116,14 @@ macOS as well as Linux. Those GNU utilities remain requirements of the original 
 Install directly from GitHub with Hermes's native plugin manager:
 
 ```bash
-hermes plugins install tharanee-bit/Claude-Fusion --enable
+hermes plugins install tharanee-bit/Claude-Fusion-Hermes --enable
 ```
 
 Or install from a checkout:
 
 ```bash
-git clone https://github.com/tharanee-bit/Claude-Fusion.git
-cd Claude-Fusion
+git clone https://github.com/tharanee-bit/Claude-Fusion-Hermes.git
+cd Claude-Fusion-Hermes
 ./install-hermes.sh          # copy into the active HERMES_HOME
 ./doctor-hermes.sh           # read-only diagnostics
 ```
@@ -174,6 +174,9 @@ selected read-oriented Bash commands, and optional Task/Workflow fan-out. Claude
 those tools to the filtered paths: when `readonly` is enabled, Claude can autonomously read denied
 files such as `.env` and any other file available to the user's process despite prompt instructions.
 Only enable it in a checkout whose complete readable contents are safe to disclose to Claude.
+Likewise, only the exact string `workflow` enables workflow depth, only boolean `true` enables
+`ultracode`, and only explicit booleans override the safety and review controls. Malformed values
+retain the least-privileged documented defaults.
 
 In the default tool-free mode, final-review artifacts use copy-aware Git provenance checks and omit
 sensitive rename/copy sources and uncertain destinations. `max_file_bytes` applies to both the

@@ -705,6 +705,61 @@ class HermesPluginTestCase(unittest.TestCase):
         )
         self.assertIn("--allowedTools", readonly_args)
 
+    def test_privilege_bearing_settings_require_exact_opt_in_values(self):
+        module = load_runtime_module()
+        malformed = (None, "", "false", "typo", 0, 1, [], {})
+
+        for value in malformed:
+            settings = module.Settings(
+                depth=value,
+                ultracode=value,
+                tools="readonly",
+                safe_mode=value,
+                enabled=value,
+                pre_prompt=value,
+                final_review=value,
+                subagent_review=value,
+            )
+            self.assertEqual(settings.depth, "single", repr(value))
+            self.assertFalse(settings.ultracode, repr(value))
+            self.assertTrue(settings.safe_mode, repr(value))
+            self.assertTrue(settings.enabled, repr(value))
+            self.assertTrue(settings.pre_prompt, repr(value))
+            self.assertTrue(settings.final_review, repr(value))
+            self.assertTrue(settings.subagent_review, repr(value))
+            args = module.ClaudeFusionRuntime(settings=settings)._claude_args(
+                "claude", {}, "model", "high", True, False
+            )
+            self.assertIn("--safe-mode", args, repr(value))
+            self.assertNotIn("Task", " ".join(args), repr(value))
+            self.assertNotIn("Workflow", " ".join(args), repr(value))
+            self.assertNotIn("ToolSearch", " ".join(args), repr(value))
+
+        privileged = module.Settings(
+            depth="workflow",
+            ultracode=True,
+            tools="readonly",
+            safe_mode=False,
+            enabled=False,
+            pre_prompt=False,
+            final_review=False,
+            subagent_review=False,
+        )
+        self.assertEqual(privileged.depth, "workflow")
+        self.assertTrue(privileged.ultracode)
+        self.assertFalse(privileged.safe_mode)
+        self.assertFalse(privileged.enabled)
+        self.assertFalse(privileged.pre_prompt)
+        self.assertFalse(privileged.final_review)
+        self.assertFalse(privileged.subagent_review)
+        privileged_args = module.ClaudeFusionRuntime(settings=privileged)._claude_args(
+            "claude", {}, "model", "high", True, False
+        )
+        self.assertNotIn("--safe-mode", privileged_args)
+        self.assertIn("Task", " ".join(privileged_args))
+        self.assertIn("Workflow", " ".join(privileged_args))
+        self.assertIn("ToolSearch", " ".join(privileged_args))
+
     def test_tool_call_identity_prevents_one_finding_one_pass_cross_attribution(self):
         module = load_runtime_module()
         runtime = module.ClaudeFusionRuntime()
