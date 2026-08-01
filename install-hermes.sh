@@ -81,7 +81,11 @@ fi
 PLUGINS_DIR="${HERMES_HOME_DIR}/plugins"
 CONFIG_PATH="${HERMES_HOME_DIR}/config.yaml"
 mkdir -p "$PLUGINS_DIR"
-WORK_DIR="$(mktemp -d "${PLUGINS_DIR}/.claude-fusion.install.XXXXXX")"
+# Keep staged and backup manifests outside the plugin discovery tree. Hermes
+# recursively discovers plugin.yaml files under plugins/, so an in-tree backup
+# can shadow the activated plugin during a forced upgrade. HERMES_HOME is on
+# the same filesystem, preserving atomic mv-based activation and rollback.
+WORK_DIR="$(mktemp -d "${HERMES_HOME_DIR}/.claude-fusion.install.XXXXXX")"
 STAGE_DIR="${WORK_DIR}/staged"
 BACKUP_DIR="${WORK_DIR}/previous"
 CONFIG_BACKUP="${WORK_DIR}/config.yaml"

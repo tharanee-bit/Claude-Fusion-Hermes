@@ -1020,6 +1020,65 @@ class HermesPluginTestCase(unittest.TestCase):
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep me\n")
         self.assertEqual(config_path.read_text(encoding="utf-8"), "plugins:\n  enabled: []\n")
 
+    def test_force_upgrade_hides_backup_from_plugin_discovery(self):
+        hermes_home = self.base / "hermes-home"
+        target = hermes_home / "plugins" / "claude-fusion"
+        target.mkdir(parents=True)
+        shutil.copy2(ROOT / "plugin.yaml", target / "plugin.yaml")
+        sentinel = target / "previous-install.txt"
+        sentinel.write_text("old install\n", encoding="utf-8")
+        fake_hermes = self.bin / "hermes"
+        fake_hermes.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import os
+                import sys
+                from pathlib import Path
+
+                home = Path(os.environ["HERMES_HOME"])
+                target = home / "plugins" / "claude-fusion" / "plugin.yaml"
+                if sys.argv[1:] == ["--version"]:
+                    print("Hermes Agent v0.19.1")
+                    raise SystemExit(0)
+                if sys.argv[1:3] == ["plugins", "enable"]:
+                    manifests = sorted((home / "plugins").rglob("plugin.yaml"))
+                    if manifests != [target]:
+                        print("unexpected discoverable manifests: " + json.dumps([str(p) for p in manifests]))
+                        raise SystemExit(1)
+                    raise SystemExit(0)
+                if sys.argv[1:3] == ["plugins", "list"]:
+                    print(json.dumps([{
+                        "name": "claude-fusion",
+                        "status": "enabled",
+                        "source": "user",
+                    }]))
+                    raise SystemExit(0)
+                raise SystemExit(1)
+                """
+            ),
+            encoding="utf-8",
+        )
+        fake_hermes.chmod(fake_hermes.stat().st_mode | stat.S_IXUSR)
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(hermes_home)
+        env["PATH"] = str(self.bin) + os.pathsep + env.get("PATH", "")
+
+        completed = subprocess.run(
+            ["bash", str(ROOT / "install-hermes.sh"), "--force"],
+            cwd=str(ROOT),
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertFalse(sentinel.exists())
+        self.assertEqual(list((hermes_home / "plugins").rglob("plugin.yaml")), [target / "plugin.yaml"])
+
     def test_copy_install_and_doctor_rejects_broken_installed_entrypoint(self):
         hermes_home = self.base / "hermes-home"
         env = os.environ.copy()
